@@ -2,19 +2,12 @@
 """
 All-in-One Payload Decoder (CLI)
 Auto-detects and iteratively decodes common encodings/obfuscations
-used in scripts and payloads (e.g., PowerShell -enc UTF-16LE base64,
-URL/HTML entities, hex, gzip/zlib, ROT, XOR, etc.).
+(e.g., PowerShell -enc UTF-16LE base64, URL/HTML entities, hex,
+gzip/zlib/bz2/lzma, ROT/ROT-N, XOR).
 
-Supports:
-- File input
-- Stdin input (pipe)
-- Interactive paste mode
-- Linewise decoding (--linewise)
-- In-place block decoding within lines (--inplace-blocks)
-- Optional ROT13/ROT-N (--enable-rot)
-- Optional single-byte XOR hunt (--enable-xor)
-
-Created with ❤️ by Ishan Anand
+Updates in this build:
+- HEX is prioritized before Base64 (to avoid B64 false-positives on hex strings).
+- Readability auto-stop: stop decoding once output looks like natural text.
 """
 import argparse
 import base64
@@ -52,6 +45,7 @@ def score_readability(s: str) -> float:
         return 0.0
     tokens = len(s.split())
     ascii_ratio = sum(ch in string.printable for ch in s) / max(1, len(s))
+    # Light heuristic for "looks like normal text"
     return 0.3 * min(tokens/20.0, 1.0) + 0.7 * ascii_ratio
 
 # ---------- Decoders (return (name, out_bytes) or None) ----------
@@ -110,8 +104,7 @@ def try_utf16be_text(data: bytes) -> Optional[Tuple[str, bytes]]:
     return None
 
 def try_hex_bytes(data: bytes) -> Optional[Tuple[str, bytes]]:
-    # Accept hex with spaces or separators; we strip them
-    s = re.sub(rb"[^0-9A-Fa-f]", b"", data)
+    s = re.sub(rb"[^0-9A-Fa-f]", b"", data)  # allow spaces/colons etc.
     if len(s) < 4 or len(s) % 2 != 0:
         return None
     try:
@@ -215,10 +208,10 @@ def try_xor_single_byte(data: bytes, min_printable: float = 0.85) -> Optional[Tu
 
 # ---------- Core pipeline ----------
 def build_decoders(enable_rot: bool, enable_xor: bool) -> List[Callable[[bytes], Optional[Tuple[str, bytes]]]]:
-    # PRIORITIZE HEX BEFORE BASE64 to avoid base64 false positives on hex strings
+    # HEX before Base64 to reduce false positives
     decoders = [
         try_powershell_b64_utf16le,
-        try_hex_bytes,          # <-- moved earlier
+        try_hex_bytes,          # prioritized
         try_base64_raw,
         try_base64_urlsafe,
         try_utf16le_text,
@@ -237,6 +230,12 @@ def build_decoders(enable_rot: bool, enable_xor: bool) -> List[Callable[[bytes],
         decoders.insert(-1, try_xor_single_byte)
     return decoders
 
+def looks_like_final_text(b: bytes) -> bool:
+    if not is_mostly_printable(b, 0.9):
+        return False
+    s = b.decode("utf-8", errors="ignore")
+    return score_readability(s) >= 0.9
+
 def auto_decode(data: bytes, max_steps: int, enable_rot: bool, enable_xor: bool) -> Tuple[bytes, List[Tuple[int,str,int]]]:
     decoders = build_decoders(enable_rot=enable_rot, enable_xor=enable_xor)
     log: List[Tuple[int,str,int]] = []
@@ -252,6 +251,9 @@ def auto_decode(data: bytes, max_steps: int, enable_rot: bool, enable_xor: bool)
                 cur = out
                 log.append((i, name, len(out)))
                 progress = True
+                # NEW: readability auto-stop
+                if looks_like_final_text(cur):
+                    return cur, log
                 break
         if not progress:
             break
@@ -357,7 +359,7 @@ def main():
         final, steps = auto_decode(raw, max_steps=args.max_steps, enable_rot=args.enable_rot, enable_xor=args.enable_xor)
         steps_log = steps
         # Hybrid assist if not very readable
-        if not args.json and score_readability(final.decode("utf-8", errors="ignore")) < 0.6:
+        if not args.json and not looks_like_final_text(final):
             final = process_linewise(final, max_steps=max(2, args.max_steps // 2), inplace_blocks=True,
                                      enable_rot=args.enable_rot, enable_xor=args.enable_xor)
             steps_log.append((999, "linewise_inplace_hybrid", len(final)))

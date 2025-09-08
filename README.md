@@ -4,10 +4,21 @@
 
 ---
 
-## ✅ Update (Hex prioritized)
-Hex decoding is now **prioritized before Base64** to avoid Base64 false positives on pure hex strings. Example that now works out of the box:
+## 🔄 What’s new in this build
+- ✅ **Hex prioritized before Base64** to prevent false positives on hex strings.
+- ✅ **Readability auto-stop** — the pipeline stops early once output looks like plain, natural text (prevents over-decoding like double-Base64 on “Hello World”).
+
+### Example
+```bash
+# Plain Base64 (Hello World)
+echo -n SGVsbG8gV29ybGQ= | python decoder_cli.py -
+# Decoding steps:
+#   [1] base64 -> 11 bytes
+# Final preview: Hello World
+```
 
 ```bash
+# UTF-16 hex (Hello!)
 echo -n 480065006C006C006F002100 | python decoder_cli.py -
 # Decoding steps:
 #   [1] hex      -> 12 bytes
@@ -20,7 +31,7 @@ echo -n 480065006C006C006F002100 | python decoder_cli.py -
 ## ✨ Features
 - Detects & unwraps Base64, Base64URL, UTF-16 LE/BE, URL percent-encoding, HTML entities, Hex (with/without spaces), and compression (gzip/zlib/bz2/lzma).
 - PowerShell **`-enc`** support (UTF-16LE → Base64).
-- **Iterative decoding pipeline**: runs multiple passes until no more progress or step limit reached.
+- **Iterative decoding pipeline** that restarts after each successful transform.
 - **Line-aware modes** for partial encodings:
   - `--linewise`: decode each line independently.
   - `--inplace-blocks`: decode **embedded blocks** (Base64/Hex/URL/HTML) inside lines without touching surrounding text.
@@ -43,48 +54,30 @@ python3 -m venv .venv && source .venv/bin/activate   # macOS/Linux
 ---
 
 ## 🖥️ Usage
-
-### File input
 ```bash
+# File input
 python decoder_cli.py payload.txt
-```
 
-### Stdin (pipe)
-```bash
-echo -n 480065006C006C006F002100 | python decoder_cli.py -
-```
+# Stdin (pipe)
+echo -n SGVsbG8gV29ybGQ= | python decoder_cli.py -
 
-### Interactive paste mode
-```bash
+# Interactive paste mode
 python decoder_cli.py
 # Paste your blob, then press Ctrl+D (macOS/Linux) or Ctrl+Z then Enter (Windows)
-```
 
-### Per-line decoding
-```bash
+# Per-line decoding (and decode embedded blocks in place)
 python decoder_cli.py sample.txt --linewise
 python decoder_cli.py sample.txt --linewise --inplace-blocks
-```
 
-### Enable ROT & XOR heuristics
-```bash
+# Enable ROT & XOR heuristics
 python decoder_cli.py payload.txt --enable-rot --enable-xor --max-steps 10
-```
 
-### Save decoded output
-```bash
+# Save decoded output
 python decoder_cli.py payload.txt -o decoded.txt
-```
 
-### JSON report (steps + preview)
-```bash
+# JSON report
 python decoder_cli.py payload.txt --json
 ```
-
----
-
-## 🧭 How it works
-The tool iteratively applies a set of decoders. If a decoder changes the data meaningfully, the pipeline restarts from the top with the new bytes, until no further progress is made or the step limit is reached. A readability score helps decide when to accept UTF-16 text and guides a hybrid linewise pass when output looks mixed.
 
 ---
 
