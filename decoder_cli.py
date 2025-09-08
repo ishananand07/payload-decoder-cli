@@ -110,6 +110,7 @@ def try_utf16be_text(data: bytes) -> Optional[Tuple[str, bytes]]:
     return None
 
 def try_hex_bytes(data: bytes) -> Optional[Tuple[str, bytes]]:
+    # Accept hex with spaces or separators; we strip them
     s = re.sub(rb"[^0-9A-Fa-f]", b"", data)
     if len(s) < 4 or len(s) % 2 != 0:
         return None
@@ -214,13 +215,14 @@ def try_xor_single_byte(data: bytes, min_printable: float = 0.85) -> Optional[Tu
 
 # ---------- Core pipeline ----------
 def build_decoders(enable_rot: bool, enable_xor: bool) -> List[Callable[[bytes], Optional[Tuple[str, bytes]]]]:
+    # PRIORITIZE HEX BEFORE BASE64 to avoid base64 false positives on hex strings
     decoders = [
         try_powershell_b64_utf16le,
+        try_hex_bytes,          # <-- moved earlier
         try_base64_raw,
         try_base64_urlsafe,
         try_utf16le_text,
         try_utf16be_text,
-        try_hex_bytes,
         try_url_decode,
         try_html_entities,
         try_gzip,
