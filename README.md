@@ -4,26 +4,21 @@
 
 ---
 
-## 🔄 What’s new in this build
-- ✅ **Hex prioritized before Base64** to prevent false positives on hex strings.
-- ✅ **Readability auto-stop** — the pipeline stops early once output looks like plain, natural text (prevents over-decoding like double-Base64 on “Hello World”).
-
-### Example
+## 🔒 Update: Stricter Base64 + Hard Stop
+This build tightens Base64 detection and **stops immediately** when a Base64 decode yields natural text. Fixes the double-decoding issue:
 ```bash
-# Plain Base64 (Hello World)
 echo -n SGVsbG8gV29ybGQ= | python decoder_cli.py -
 # Decoding steps:
-#   [1] base64 -> 11 bytes
+#   [1] base64_final -> 11 bytes
 # Final preview: Hello World
 ```
 
+Hex is still prioritized before Base64:
 ```bash
-# UTF-16 hex (Hello!)
 echo -n 480065006C006C006F002100 | python decoder_cli.py -
-# Decoding steps:
-#   [1] hex      -> 12 bytes
-#   [2] utf16le  -> 12 bytes
-# Final preview: Hello!
+# [1] hex -> 12 bytes
+# [2] utf16le -> 12 bytes
+# Final: Hello!
 ```
 
 ---

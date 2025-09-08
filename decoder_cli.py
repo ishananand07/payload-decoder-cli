@@ -6,8 +6,9 @@ Auto-detects and iteratively decodes common encodings/obfuscations
 gzip/zlib/bz2/lzma, ROT/ROT-N, XOR).
 
 Updates in this build:
-- HEX is prioritized before Base64 (to avoid B64 false-positives on hex strings).
-- Readability auto-stop: stop decoding once output looks like natural text.
+- HEX prioritized before Base64
+- Readability auto-stop after each successful step
+- **Stricter Base64 detection** and **hard stop** when decoded data is plain text
 """
 import argparse
 import base64
@@ -28,7 +29,7 @@ from typing import List, Tuple, Optional, Callable
 # ---------- Utilities ----------
 PRINTABLE_SET = set(bytes(string.printable, "ascii"))
 
-def is_mostly_printable(b: bytes, threshold: float = 0.85) -> bool:
+def is_mostly_printable(b: bytes, threshold: float = 0.9) -> bool:
     if not b:
         return False
     printable = sum(ch in PRINTABLE_SET for ch in b)
@@ -45,62 +46,84 @@ def score_readability(s: str) -> float:
         return 0.0
     tokens = len(s.split())
     ascii_ratio = sum(ch in string.printable for ch in s) / max(1, len(s))
-    # Light heuristic for "looks like normal text"
     return 0.3 * min(tokens/20.0, 1.0) + 0.7 * ascii_ratio
+
+def looks_like_final_text(b: bytes) -> bool:
+    if not is_mostly_printable(b, 0.9):
+        return False
+    s = b.decode("utf-8", errors="ignore")
+    return score_readability(s) >= 0.9
 
 # ---------- Decoders (return (name, out_bytes) or None) ----------
 def try_base64_raw(data: bytes) -> Optional[Tuple[str, bytes]]:
     s = data.strip().replace(b"\n", b"").replace(b" ", b"")
-    if not re.fullmatch(rb"[A-Za-z0-9+/=_-]{8,}", s or b""):
+    # stricter: require multiple of 4 and allowed alphabet only
+    if len(s) < 8 or len(s) % 4 != 0:
         return None
-    pad = (-len(s)) % 4
-    s += b"=" * pad
+    if not re.fullmatch(rb"[A-Za-z0-9+/=]+", s or b""):
+        return None
     try:
-        out = base64.b64decode(s, validate=False)
-        if out:
-            return ("base64", out)
+        out = base64.b64decode(s, validate=True)
+        # If the decoded result is clearly plain text, mark as final
+        if looks_like_final_text(out):
+            return ("base64_final", out)
+        return ("base64", out)
     except Exception:
-        pass
-    return None
+        return None
 
 def try_base64_urlsafe(data: bytes) -> Optional[Tuple[str, bytes]]:
     s = data.strip().replace(b"\n", b"").replace(b" ", b"")
-    if not re.fullmatch(rb"[A-Za-z0-9\-_]{8,}={0,2}", s or b""):
+    if len(s) < 8 or len(s) % 4 != 0:
         return None
-    pad = (-len(s)) % 4
-    s += b"=" * pad
+    if not re.fullmatch(rb"[A-Za-z0-9\-_=]+", s or b""):
+        return None
     try:
         out = base64.urlsafe_b64decode(s)
-        if out:
-            return ("base64url", out)
+        if looks_like_final_text(out):
+            return ("base64url_final", out)
+        return ("base64url", out)
     except Exception:
-        pass
-    return None
+        return None
 
 def try_powershell_b64_utf16le(data: bytes) -> Optional[Tuple[str, bytes]]:
     res = try_base64_raw(data) or try_base64_urlsafe(data)
     if not res:
         return None
-    _, b = res
+    name, b = res
+    # If the raw b64 looked like final ASCII text, don't treat as PS
+    if name.endswith("_final"):
+        return res
     txt = safe_decode(b, "utf-16le")
     if not txt:
         return None
     if re.search(r"\b(Invoke-|FromBase64String|IEX|New-Object|Set-Item|DownloadString|Start-Process)\b", txt, re.I):
+        enc = txt.encode("utf-8", errors="ignore")
+        if looks_like_final_text(enc):
+            return ("powershell_b64_utf16le_final", enc)
         return ("powershell_b64_utf16le", b)
     if is_mostly_printable(txt.encode("utf-8", errors="ignore"), 0.6):
+        enc = txt.encode("utf-8", errors="ignore")
+        if looks_like_final_text(enc):
+            return ("powershell_b64_utf16le_final", enc)
         return ("powershell_b64_utf16le", b)
     return None
 
 def try_utf16le_text(data: bytes) -> Optional[Tuple[str, bytes]]:
     txt = safe_decode(data, "utf-16le")
     if txt and score_readability(txt) > 0.5:
-        return ("utf16le", txt.encode("utf-8", errors="ignore"))
+        enc = txt.encode("utf-8", errors="ignore")
+        if looks_like_final_text(enc):
+            return ("utf16le_final", enc)
+        return ("utf16le", enc)
     return None
 
 def try_utf16be_text(data: bytes) -> Optional[Tuple[str, bytes]]:
     txt = safe_decode(data, "utf-16be")
     if txt and score_readability(txt) > 0.5:
-        return ("utf16be", txt.encode("utf-8", errors="ignore"))
+        enc = txt.encode("utf-8", errors="ignore")
+        if looks_like_final_text(enc):
+            return ("utf16be_final", enc)
+        return ("utf16be", enc)
     return None
 
 def try_hex_bytes(data: bytes) -> Optional[Tuple[str, bytes]]:
@@ -109,7 +132,9 @@ def try_hex_bytes(data: bytes) -> Optional[Tuple[str, bytes]]:
         return None
     try:
         out = binascii.unhexlify(s)
-        return ("hex", out) if out else None
+        if looks_like_final_text(out):
+            return ("hex_final", out)
+        return ("hex", out)
     except Exception:
         return None
 
@@ -119,8 +144,11 @@ def try_url_decode(data: bytes) -> Optional[Tuple[str, bytes]]:
         return None
     try:
         out = urllib.parse.unquote_plus(s)
+        out_b = out.encode("utf-8", errors="ignore")
         if out and out != s:
-            return ("url", out.encode("utf-8", errors="ignore"))
+            if looks_like_final_text(out_b):
+                return ("url_final", out_b)
+            return ("url", out_b)
     except Exception:
         pass
     return None
@@ -130,12 +158,19 @@ def try_html_entities(data: bytes) -> Optional[Tuple[str, bytes]]:
     if "&" not in s:
         return None
     out = html.unescape(s)
-    return ("html_entities", out.encode("utf-8", errors="ignore")) if out and out != s else None
+    out_b = out.encode("utf-8", errors="ignore")
+    if out and out != s:
+        if looks_like_final_text(out_b):
+            return ("html_entities_final", out_b)
+        return ("html_entities", out_b)
+    return None
 
 def try_zlib(data: bytes) -> Optional[Tuple[str, bytes]]:
     try:
         out = zlib.decompress(data)
-        return ("zlib", out) if out else None
+        if looks_like_final_text(out):
+            return ("zlib_final", out)
+        return ("zlib", out)
     except Exception:
         return None
 
@@ -143,25 +178,33 @@ def try_gzip(data: bytes) -> Optional[Tuple[str, bytes]]:
     try:
         with gzip.GzipFile(fileobj=BytesIO(data)) as g:
             out = g.read()
-        return ("gzip", out) if out else None
+        if looks_like_final_text(out):
+            return ("gzip_final", out)
+        return ("gzip", out)
     except Exception:
         return None
 
 def try_bz2(data: bytes) -> Optional[Tuple[str, bytes]]:
     try:
         out = bz2.decompress(data)
-        return ("bz2", out) if out else None
+        if looks_like_final_text(out):
+            return ("bz2_final", out)
+        return ("bz2", out)
     except Exception:
         return None
 
 def try_lzma(data: bytes) -> Optional[Tuple[str, bytes]]:
     try:
         out = lzma.decompress(data)
-        return ("lzma", out) if out else None
+        if looks_like_final_text(out):
+            return ("lzma_final", out)
+        return ("lzma", out)
     except Exception:
         return None
 
 def try_plain_text_identity(data: bytes) -> Optional[Tuple[str, bytes]]:
+    if looks_like_final_text(data):
+        return ("text_final", data)
     s = data.decode("utf-8", errors="ignore")
     if score_readability(s) > 0.8:
         return ("text", s.encode("utf-8"))
@@ -188,10 +231,12 @@ def try_rot_any(data: bytes, min_improve: float = 0.08) -> Optional[Tuple[str, b
         if sc > best[1]:
             best = (n, sc, cand)
     if best[0] is not None and (best[1] - base) >= min_improve:
+        if looks_like_final_text(best[2]):
+            return (f"rot{best[0]}_final", best[2])
         return (f"rot{best[0]}", best[2])
     return None
 
-def try_xor_single_byte(data: bytes, min_printable: float = 0.85) -> Optional[Tuple[str, bytes]]:
+def try_xor_single_byte(data: bytes, min_printable: float = 0.9) -> Optional[Tuple[str, bytes]]:
     best_key = None
     best_out = None
     best_ratio = 0.0
@@ -203,12 +248,13 @@ def try_xor_single_byte(data: bytes, min_printable: float = 0.85) -> Optional[Tu
             best_out = cand
             best_key = k
     if best_key is not None and best_out and best_ratio >= min_printable:
+        if looks_like_final_text(best_out):
+            return (f"xor_{best_key}_final", best_out)
         return (f"xor_{best_key}", best_out)
     return None
 
 # ---------- Core pipeline ----------
 def build_decoders(enable_rot: bool, enable_xor: bool) -> List[Callable[[bytes], Optional[Tuple[str, bytes]]]]:
-    # HEX before Base64 to reduce false positives
     decoders = [
         try_powershell_b64_utf16le,
         try_hex_bytes,          # prioritized
@@ -230,12 +276,6 @@ def build_decoders(enable_rot: bool, enable_xor: bool) -> List[Callable[[bytes],
         decoders.insert(-1, try_xor_single_byte)
     return decoders
 
-def looks_like_final_text(b: bytes) -> bool:
-    if not is_mostly_printable(b, 0.9):
-        return False
-    s = b.decode("utf-8", errors="ignore")
-    return score_readability(s) >= 0.9
-
 def auto_decode(data: bytes, max_steps: int, enable_rot: bool, enable_xor: bool) -> Tuple[bytes, List[Tuple[int,str,int]]]:
     decoders = build_decoders(enable_rot=enable_rot, enable_xor=enable_xor)
     log: List[Tuple[int,str,int]] = []
@@ -251,7 +291,10 @@ def auto_decode(data: bytes, max_steps: int, enable_rot: bool, enable_xor: bool)
                 cur = out
                 log.append((i, name, len(out)))
                 progress = True
-                # NEW: readability auto-stop
+                # HARD STOP on *_final
+                if name.endswith("_final"):
+                    return cur, log
+                # also stop if overall looks like final text
                 if looks_like_final_text(cur):
                     return cur, log
                 break
@@ -358,7 +401,7 @@ def main():
     else:
         final, steps = auto_decode(raw, max_steps=args.max_steps, enable_rot=args.enable_rot, enable_xor=args.enable_xor)
         steps_log = steps
-        # Hybrid assist if not very readable
+        # Hybrid assist if not very readable (but don't mess with already final-looking text)
         if not args.json and not looks_like_final_text(final):
             final = process_linewise(final, max_steps=max(2, args.max_steps // 2), inplace_blocks=True,
                                      enable_rot=args.enable_rot, enable_xor=args.enable_xor)
