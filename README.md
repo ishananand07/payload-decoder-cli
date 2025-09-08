@@ -26,7 +26,7 @@ Useful for quick triage of encoded blobs (e.g. PowerShell `-enc`, Base64 payload
 ## ⚡ Installation
 
 ```bash
-git clone https://github.com/<your-username>/payload-decoder-cli.git
+git clone https://github.com/ishananand07/payload-decoder-cli.git
 cd payload-decoder-cli
 
 # Create virtual environment (recommended)
