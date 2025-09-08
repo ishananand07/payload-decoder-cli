@@ -63,12 +63,6 @@ echo -n 480065006C006C006F002100 | python decoder_cli.py -
 # Output: Hello!
 ```
 
-**Base64(UTF-16LE('Ishan is a Genius'))**
-```bash
-echo -n AEkAcwBoAGEAbgAgAGkAcwAgAGEAIABHAGUAbgBpAHUAcw== | python decoder_cli.py -
-# Output: Ishan is a Genius
-```
-
 ---
 
 ## ⚙️ Options
